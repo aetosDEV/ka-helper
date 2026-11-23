@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         KA Helper — Auto Responder
 // @namespace    https://github.com/aetosDEV/ka-helper
-// @version      4.0.0
-// @description  Encontra e submete a resposta correta automaticamente
+// @version      5.0.0
+// @description  Responde automaticamente exercícios do Khan Academy
 // @author       ENI
 // @match        https://*.khanacademy.org/*
 // @match        https://khanacademy.org/*
@@ -20,8 +20,8 @@
     /* ══════════════════════════════════════════
        DETECÇÃO DE PÁGINA
     ══════════════════════════════════════════ */
-    const isVideo    = () => /\/v\//.test(location.pathname);
-    const hasWidget  = () => !!(
+    const isVideo   = () => /\/v\//.test(location.pathname);
+    const hasWidget = () => !!(
         $('[data-exercise-name]')         ||
         $('[class*="exercise-renderer"]') ||
         $('[class*="perseus"]')           ||
@@ -32,16 +32,15 @@
     const shouldShow = () => !isVideo() && hasWidget();
 
     /* ══════════════════════════════════════════
-       REACT FIBER — SCAN COMPLETO DA ÁRVORE
+       REACT FIBER
     ══════════════════════════════════════════ */
     function getRootFiber() {
-        const roots = [
+        for (const c of [
             document.getElementById('root'),
             document.querySelector('[data-reactroot]'),
             document.querySelector('#app'),
             document.body
-        ];
-        for (const c of roots) {
+        ]) {
             if (!c) continue;
             const k = Object.keys(c).find(k =>
                 k.startsWith('__reactFiber') ||
@@ -52,27 +51,19 @@
         return null;
     }
 
-    // Dados Perseus descobertos na última varredura
     let pData = { radioChoices: null, numericAnswer: null, expressionForms: null };
 
     function scanFiber(node, depth = 500) {
         if (!node || depth <= 0) return;
         try {
             const props = node.memoizedProps || {};
-
-            // Radio / múltipla escolha — choices[] com correct:true
             if (Array.isArray(props.choices) && props.choices.some(c => c && 'correct' in c))
                 pData.radioChoices = props.choices;
-
-            // Numeric input — answers[] com status:'correct'
             if (Array.isArray(props.answers) && props.answers.some(a => a?.status === 'correct'))
                 pData.numericAnswer = props.answers.find(a => a.status === 'correct');
-
-            // Expression widget — answerForms[]
             if (Array.isArray(props.answerForms) && props.answerForms.length)
                 pData.expressionForms = props.answerForms;
 
-            // State hooks (algumas versões guardam choices no estado)
             let hook = node.memoizedState;
             while (hook) {
                 const ms = hook.memoizedState;
@@ -81,7 +72,6 @@
                 hook = hook.next;
             }
         } catch (_) {}
-
         scanFiber(node.child,   depth - 1);
         scanFiber(node.sibling, depth - 1);
     }
@@ -93,19 +83,48 @@
     }
 
     /* ══════════════════════════════════════════
-       PREENCHER INPUT COM EVENTO REACT
+       FILL INPUT — TRIPLA ESTRATÉGIA
+       (React onChange direto + execCommand + native setter)
     ══════════════════════════════════════════ */
-    function fillInput(input, value) {
-        try {
+    async function fillInput(input, value) {
+        const str = String(value).trim();
+
+        // 1. Foca e seleciona tudo
+        input.focus();
+        await sleep(80);
+        input.select();
+        document.execCommand('selectAll', false, null);
+
+        // 2. execCommand — mais compatível com React controlled inputs
+        const ok = document.execCommand('insertText', false, str);
+
+        // 3. Se execCommand falhou ou o valor está diferente, força via native setter
+        if (!ok || input.value !== str) {
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-            setter.call(input, String(value));
-            ['input', 'change'].forEach(ev =>
-                input.dispatchEvent(new Event(ev, { bubbles: true }))
-            );
-            input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
-            input.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: 'Enter', keyCode: 13 }));
-            return true;
-        } catch (_) { return false; }
+            setter.call(input, str);
+            input.dispatchEvent(new Event('input',  { bubbles: true, cancelable: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        }
+
+        // 4. Chama React onChange direto via fiber (mais confiável no React 18)
+        const fk = Object.keys(input).find(k =>
+            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+        );
+        if (fk) {
+            let node = input[fk];
+            while (node) {
+                const onChange = node.memoizedProps?.onChange;
+                if (onChange) {
+                    try { onChange({ target: { value: str }, currentTarget: { value: str } }); }
+                    catch (_) {}
+                    break;
+                }
+                node = node.return;
+            }
+        }
+
+        await sleep(150);
+        return input.value === str;
     }
 
     /* ══════════════════════════════════════════
@@ -119,27 +138,66 @@
             );
             if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') break;
             btn.click();
-            await sleep(700);
+            await sleep(750);
         }
-        await sleep(500);
+        await sleep(600);
     }
 
     /* ══════════════════════════════════════════
        EXTRAIR RESPOSTA DO TEXTO DAS DICAS
     ══════════════════════════════════════════ */
     function extractFromHints() {
-        const blocks = $$(
-            '[class*="hint"] span, [class*="Hint"] span, ' +
-            '[data-testid*="hint"] span, .perseus-hint-renderer span'
+        // Pega todos os containers de dica, do último pro primeiro
+        const containers = $$(
+            '[class*="hint"], [data-testid*="hint"], ' +
+            '.perseus-hint-renderer, [class*="Hint"]'
         ).reverse();
 
-        for (const el of blocks) {
-            const t = el.textContent.trim();
-            // "= 42", "= -3,5", "= 2/3"
-            const m = t.match(/=\s*([-−]?\d+[.,]?\d*(?:\/\d+)?)\s*$/);
-            if (m) return m[1].replace(',', '.').replace('−', '-');
+        const patterns = [
+            // "= 56", "= 3,5", "= −2"
+            /=\s*([-−]?\d+(?:[.,]\d+)?(?:\/\d+)?)\s*(?:cm|m|g|kg|°|%|²|³|\\u00b2|\\u00b3)?\s*$/,
+            // "56 cm³" standalone no final
+            /(?:^|\n|\s)([-−]?\d+(?:[.,]\d+)?)\s*(?:cm³|m³|cm²|m²|cm|m)\s*$/,
+            // "resposta: 56" ou "answer: 56"
+            /(?:resposta|answer|resultado|=)\s*:?\s*([-−]?\d+(?:[.,]\d+)?(?:\/\d+)?)\s*$/i,
+            // qualquer número isolado no final da última dica
+            /\b([-−]?\d+(?:[.,]\d+)?)\s*$/,
+        ];
+
+        for (const container of containers) {
+            const text = container.textContent.trim();
+            for (const pattern of patterns) {
+                const m = text.match(pattern);
+                if (m) {
+                    const val = m[1]
+                        .replace(',', '.')
+                        .replace('−', '-')
+                        .trim();
+                    // Ignora números que são dimensões da figura (geralmente pequenos como 2,4,7)
+                    if (parseFloat(val) > 0) return val;
+                }
+            }
         }
         return null;
+    }
+
+    /* ══════════════════════════════════════════
+       DETECTAR TIPO DE QUESTÃO
+    ══════════════════════════════════════════ */
+    function getQuestionType() {
+        if ($$('[role="radio"], [role="checkbox"], [data-testid*="choice"], [class*="answer-choice"]').length > 0)
+            return 'radio';
+        if ($('input[type="text"], input[type="number"], [class*="expression-input"], [class*="math-input"]'))
+            return 'input';
+        return 'unknown';
+    }
+
+    function getInputEl() {
+        return $(
+            'input[type="text"], input[type="number"], ' +
+            '[class*="expression-input"], [class*="math-input"], ' +
+            '[class*="perseus-input"] input, .perseus-widget-input-number input'
+        );
     }
 
     /* ══════════════════════════════════════════
@@ -149,7 +207,7 @@
         const btn = $(
             '[data-testid="check-answer-button"], [data-testid="submit-button"], ' +
             'button[class*="check" i], button[class*="submit" i], ' +
-            '[aria-label*="Check" i], [aria-label*="Verificar" i]'
+            '[aria-label*="Check" i], [aria-label*="Verificar" i], [aria-label*="Checar" i]'
         );
         if (btn && !btn.disabled) { btn.click(); return true; }
         return false;
@@ -169,95 +227,152 @@
        FLUXO PRINCIPAL — CORRETA
     ══════════════════════════════════════════ */
     async function handleCorrect() {
-        setStatus('Analisando...');
+        setStatus('Detectando...');
         refreshData();
 
-        // ── ESTRATÉGIA 1: Múltipla escolha via Perseus fiber ──
-        if (pData.radioChoices) {
-            const idx = pData.radioChoices.findIndex(c => c?.correct === true);
-            if (idx !== -1) {
-                const els = $$(
-                    '[role="radio"], [role="checkbox"], ' +
-                    '[data-testid*="choice"], [class*="answer-choice"], ' +
-                    '[class*="perseus-radio-option"], [class*="RadioOption"]'
-                );
-                const target = els[idx];
-                if (target) {
-                    setStatus(`Opção ${idx + 1} ✓`);
-                    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    await sleep(250);
-                    target.click();
+        const qType = getQuestionType();
+        setStatus(`Tipo: ${qType}`);
+        await sleep(300);
+
+        /* ── MÚLTIPLA ESCOLHA ── */
+        if (qType === 'radio') {
+            // Estratégia A: fiber com correct:true
+            if (pData.radioChoices) {
+                const idx = pData.radioChoices.findIndex(c => c?.correct === true);
+                if (idx !== -1) {
+                    const els = $$(
+                        '[role="radio"], [role="checkbox"], ' +
+                        '[data-testid*="choice"], [class*="answer-choice"], ' +
+                        '[class*="perseus-radio-option"], [class*="RadioOption"]'
+                    );
+                    if (els[idx]) {
+                        setStatus(`Opção ${idx + 1} ✓`);
+                        els[idx].scrollIntoView({ block: 'center', behavior: 'smooth' });
+                        await sleep(250);
+                        els[idx].click();
+                        await sleep(400);
+                        clickCheck();
+                        setStatus('✓ Correta!');
+                        return;
+                    }
+                }
+            }
+
+            // Estratégia B: drain de dicas → opção destacada pós-dica
+            setStatus('Dicas (radio)...');
+            await drainHints();
+            const highlighted = $(
+                '[class*="correct"], [data-correct="true"], ' +
+                '[class*="answer--correct"], [class*="answerCorrect"]'
+            );
+            if (highlighted) { highlighted.click(); await sleep(300); }
+            clickCheck();
+            setStatus('✓ Enviada');
+            return;
+        }
+
+        /* ── INPUT NUMÉRICO / EXPRESSÃO ── */
+        if (qType === 'input') {
+            // Estratégia A: fiber com numeric answer
+            if (pData.numericAnswer?.value !== undefined) {
+                const val = pData.numericAnswer.value;
+                const inp = getInputEl();
+                if (inp) {
+                    setStatus(`Fiber: ${val}`);
+                    await fillInput(inp, val);
+                    await sleep(400);
+                    if (inp.value === String(val)) {
+                        clickCheck();
+                        setStatus('✓ Correta!');
+                        return;
+                    }
+                }
+            }
+
+            // Estratégia B: expression fiber
+            if (pData.expressionForms?.length) {
+                const form = pData.expressionForms.find(f => f.considered === 'correct' || f.value);
+                if (form?.value) {
+                    const inp = getInputEl();
+                    if (inp) {
+                        setStatus(`Expr: ${form.value}`);
+                        await fillInput(inp, form.value);
+                        await sleep(400);
+                        clickCheck();
+                        setStatus('✓ Correta!');
+                        return;
+                    }
+                }
+            }
+
+            // Estratégia C: drain dicas + extrair + preencher
+            setStatus('Usando dicas...');
+            await drainHints();
+
+            // Re-scan após dicas (Perseus às vezes atualiza o fiber)
+            refreshData();
+            if (pData.numericAnswer?.value !== undefined) {
+                const val = pData.numericAnswer.value;
+                const inp = getInputEl();
+                if (inp) {
+                    setStatus(`Pós-dica fiber: ${val}`);
+                    await fillInput(inp, val);
                     await sleep(400);
                     clickCheck();
                     setStatus('✓ Correta!');
                     return;
                 }
             }
-        }
 
-        // ── ESTRATÉGIA 2: Input numérico via Perseus fiber ──
-        if (pData.numericAnswer?.value !== undefined) {
-            const val = pData.numericAnswer.value;
-            const inputs = $$('input[type="text"], input[type="number"], [class*="perseus-input"]');
-            if (inputs.length) {
-                setStatus(`Digitando ${val}...`);
-                fillInput(inputs[0], val);
+            const hintVal = extractFromHints();
+            const inp = getInputEl();
+            if (inp && hintVal) {
+                setStatus(`Dica: ${hintVal}`);
+                await fillInput(inp, hintVal);
                 await sleep(500);
-                clickCheck();
-                setStatus('✓ Correta!');
-                return;
-            }
-        }
 
-        // ── ESTRATÉGIA 3: Expression widget via fiber ──
-        if (pData.expressionForms?.length) {
-            const form = pData.expressionForms.find(f => f.value || f.considered === 'correct');
-            if (form?.value) {
-                const inputs = $$('input[type="text"], [class*="expression-input"], [class*="math-input"]');
-                if (inputs.length) {
-                    setStatus(`Expressão: ${form.value}`);
-                    fillInput(inputs[0], form.value);
-                    await sleep(500);
+                // Verifica se preencheu antes de submeter
+                if (inp.value && inp.value.trim() !== '') {
                     clickCheck();
                     setStatus('✓ Correta!');
                     return;
                 }
+
+                // Se ainda vazio, tenta Enter no input
+                inp.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Enter', keyCode: 13, bubbles: true
+                }));
+                await sleep(300);
+                clickCheck();
+                setStatus('✓ Enviada');
+                return;
             }
-        }
 
-        // ── ESTRATÉGIA 4: Drain de dicas + extração ──
-        setStatus('Usando dicas...');
-        await drainHints();
-
-        // Tenta preencher input com resposta extraída das dicas
-        const hintVal = extractFromHints();
-        const inputs = $$('input[type="text"], input[type="number"], [class*="expression-input"]');
-        if (inputs.length && hintVal) {
-            setStatus(`Dica: ${hintVal}`);
-            fillInput(inputs[0], hintVal);
-            await sleep(400);
+            // Estratégia D: input estava vazio, tenta submeter (às vezes KA pré-preenche)
             clickCheck();
-            setStatus('✓ Enviada');
+            setStatus('Verificando...');
             return;
         }
 
-        // ── ESTRATÉGIA 5: Resposta destacada pós-dicas ──
-        const highlighted = $(
-            '[class*="correct"], [data-correct="true"], ' +
-            '[class*="answer--correct"], [class*="answerCorrect"], ' +
-            '[class*="choice-correct"]'
-        );
-        if (highlighted) { highlighted.click(); await sleep(300); }
-
+        /* ── TIPO DESCONHECIDO ── */
+        setStatus('Dicas (fallback)...');
+        await drainHints();
         clickCheck();
         setStatus('✓ Enviada');
     }
 
+    /* ══════════════════════════════════════════
+       INCORRETA / PRÓXIMO
+    ══════════════════════════════════════════ */
     async function handleIncorrect() {
         setStatus('Enviando errada...');
         const choices = $$('[role="radio"], [role="checkbox"], [data-testid*="choice"]');
         if (choices.length > 1) choices[choices.length - 1].click();
         else if (choices.length === 1) choices[0].click();
+        else {
+            const inp = getInputEl();
+            if (inp) await fillInput(inp, '0');
+        }
         await sleep(200);
         clickCheck();
         setStatus('✗ Incorreta');
@@ -272,7 +387,7 @@
     /* ══════════════════════════════════════════
        UI
     ══════════════════════════════════════════ */
-    const ID = 'ka-helper-v4';
+    const ID = 'ka-helper-v5';
     let statusEl = null;
     const setStatus = msg => { if (statusEl) statusEl.textContent = msg; };
 
@@ -285,14 +400,15 @@
                 position: fixed !important; bottom: 28px !important; right: 28px !important;
                 z-index: 2147483647 !important; background: #0d1117;
                 border: 1px solid #21262d; border-radius: 14px; padding: 16px;
-                width: 170px; display: flex !important; flex-direction: column;
+                width: 175px; display: flex !important; flex-direction: column;
                 gap: 9px; box-shadow: 0 8px 40px rgba(0,0,0,.85);
                 font-family: ui-sans-serif, system-ui, sans-serif; user-select: none;
             }
             #${ID}-title  { font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:#484f58; text-align:center; }
-            #${ID}-status { font-size:12px; color:#58a6ff; text-align:center; min-height:15px; }
+            #${ID}-status { font-size:11px; color:#58a6ff; text-align:center; min-height:14px; word-break:break-all; }
             #${ID} button { border:none; border-radius:9px; padding:10px 0; font-size:13px; font-weight:600; cursor:pointer; transition:opacity .15s, transform .1s; }
             #${ID} button:hover  { opacity:.85; transform:translateY(-1px); }
+            #${ID} button:active { opacity:1;   transform:translateY(0);    }
             #${ID}-correct   { background:#238636; color:#fff; }
             #${ID}-incorrect { background:#b91c1c; color:#fff; }
             #${ID}-next      { background:#1d4ed8; color:#fff; }
@@ -342,6 +458,8 @@
         }
     }).observe(document.body, { childList: true, subtree: true });
 
-    [1500, 3000, 5000].forEach(d => setTimeout(() => { if (shouldShow()) createPanel(); }, d));
+    [1500, 3000, 5000].forEach(d =>
+        setTimeout(() => { if (shouldShow()) createPanel(); }, d)
+    );
     startScan(25000);
 })();
