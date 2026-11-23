@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         KA Helper — Correta / Incorreta / Próximo
-// @namespace    https://github.com/SEU_USUARIO/ka-helper
-// @version      2.1.0
-// @description  Painel flutuante nos exercícios do Khan Academy. Vídeos ignorados automaticamente.
+// @namespace    https://github.com/aetosDEV/ka-helper
+// @version      3.0.0
+// @description  Painel flutuante nos exercícios do Khan Academy (PT + EN)
 // @author       ENI
-// @match        https://www.khanacademy.org/*
+// @match        https://*.khanacademy.org/*
+// @match        https://khanacademy.org/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -12,32 +13,42 @@
 (function () {
     'use strict';
 
-    /* ═══════════════════════════════════════════
-       UTILS
-    ═══════════════════════════════════════════ */
     const $  = (sel, root = document) => root.querySelector(sel);
     const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    /* ═══════════════════════════════════════════
-       DETECÇÃO DE PÁGINA
-    ═══════════════════════════════════════════ */
+    /* ══════════════════════════════════════
+       DETECÇÃO
+    ══════════════════════════════════════ */
     function isVideo() {
-        return /\/v\//.test(location.href);
+        return /\/v\//.test(location.pathname);
     }
 
-    function isExercise() {
-        if (/\/e\//.test(location.href)) return true;
-        if (/[?&]q=/.test(location.href) && location.href.includes('khanacademy')) return true;
-        // Widget de exercício embutido em página de lição
-        return !!$('[data-exercise-name], [class*="exercise-renderer"], [data-testid*="exercise"]');
+    function hasExerciseWidget() {
+        return !!(
+            $('[data-exercise-name]')                   ||
+            $('[class*="exercise-renderer"]')           ||
+            $('[data-testid*="exercise"]')              ||
+            $('[class*="ExerciseCard"]')                ||
+            $('[class*="perseus"]')                     ||
+            $('div[class*="problem-and-hints"]')        ||
+            $('div[class*="framework-perseus"]')        ||
+            $('[data-testid="exercise-card-content"]')  ||
+            $('div.perseus-root')
+        );
     }
 
-    /* ═══════════════════════════════════════════
-       REACT FIBER — leitura de estado interno
-    ═══════════════════════════════════════════ */
+    function shouldShow() {
+        if (isVideo()) return false;
+        if (/\/e\//.test(location.pathname)) return true;
+        if (hasExerciseWidget()) return true;
+        return false;
+    }
+
+    /* ══════════════════════════════════════
+       REACT FIBER
+    ══════════════════════════════════════ */
     function getFiber(el) {
-        if (!el) return null;
         const k = Object.keys(el).find(k =>
             k.startsWith('__reactFiber') ||
             k.startsWith('__reactInternalInstance')
@@ -45,56 +56,56 @@
         return k ? el[k] : null;
     }
 
-    function walkFiber(node, depth = 60) {
+    function walkFiber(node, depth = 80) {
         if (!node || depth <= 0) return null;
         const p = node.memoizedProps ?? node.pendingProps ?? {};
-        if (p.correct === true || p.isCorrect === true) return node;
-        return walkFiber(node.child, depth - 1)
-            ?? walkFiber(node.sibling, depth - 1);
+        if (p.correct === true || p.isCorrect === true || p.checked === true) return node;
+        return walkFiber(node.child, depth - 1) ?? walkFiber(node.sibling, depth - 1);
     }
 
     function findCorrectViaFiber() {
-        const candidates = $$(
-            '[role="radio"], [role="checkbox"], [data-testid*="choice"], [class*="answer-choice"], [class*="radio-button"]'
+        const els = $$(
+            '[role="radio"], [role="checkbox"], ' +
+            '[data-testid*="choice"], [data-testid*="answer"], ' +
+            '[class*="answer-choice"], [class*="choice-icon"], ' +
+            '[class*="radio-button"]'
         );
-        for (const el of candidates) {
-            const fiber = getFiber(el);
-            if (!fiber) continue;
-            const hit = walkFiber(fiber);
-            if (hit) return el;
+        for (const el of els) {
+            try {
+                const fiber = getFiber(el);
+                if (!fiber) continue;
+                if (walkFiber(fiber)) return el;
+            } catch (_) {}
         }
         return null;
     }
 
-    /* ═══════════════════════════════════════════
-       HINT CHAIN — fallback universal
-    ═══════════════════════════════════════════ */
-    async function drainHints(max = 10) {
+    /* ══════════════════════════════════════
+       INTERAÇÃO
+    ══════════════════════════════════════ */
+    async function drainHints(max = 12) {
         for (let i = 0; i < max; i++) {
             const btn = $(
                 '[data-testid="hint-button"], ' +
                 '[aria-label*="hint" i], ' +
-                'button[class*="hint"], ' +
-                'button[class*="Hint"]'
+                '[aria-label*="dica" i], ' +
+                'button[class*="hint"], button[class*="Hint"]'
             );
-            if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') break;
+            if (!btn || btn.disabled) break;
             btn.click();
-            await sleep(700);
+            await sleep(650);
         }
         await sleep(400);
     }
 
-    /* ═══════════════════════════════════════════
-       INTERAÇÃO COM KA
-    ═══════════════════════════════════════════ */
     function clickCheck() {
         const btn = $(
             '[data-testid="check-answer-button"], ' +
-            'button[class*="check"], ' +
-            'button[class*="Check"], ' +
-            'button[class*="submit"], ' +
-            '[aria-label*="Check" i], ' +
-            '[aria-label*="Verificar" i]'
+            '[data-testid="submit-button"], ' +
+            'button[class*="check"], button[class*="Check"], ' +
+            'button[class*="submit"], button[class*="Submit"], ' +
+            '[aria-label*="Check" i], [aria-label*="Verificar" i], ' +
+            '[aria-label*="Checar" i]'
         );
         if (btn && !btn.disabled) { btn.click(); return true; }
         return false;
@@ -103,40 +114,32 @@
     function clickNext() {
         const btn = $(
             '[data-testid="next-button"], ' +
-            'button[class*="next"], ' +
-            'button[class*="Next"], ' +
-            'button[class*="continue"], ' +
-            '[aria-label*="Next" i], ' +
-            '[aria-label*="Continue" i], ' +
-            '[aria-label*="Próximo" i]'
+            '[data-testid="continue-button"], ' +
+            'button[class*="next"], button[class*="Next"], ' +
+            'button[class*="continue"], button[class*="Continue"], ' +
+            '[aria-label*="Next" i], [aria-label*="Continue" i], ' +
+            '[aria-label*="Próximo" i], [aria-label*="Continuar" i]'
         );
         if (btn) { btn.click(); return true; }
         return false;
     }
 
-    function pickWrongAnswer() {
+    function pickWrong() {
         const choices = $$(
-            '[role="radio"], [role="checkbox"], [data-testid*="choice"]'
+            '[role="radio"], [role="checkbox"], ' +
+            '[data-testid*="choice"], [class*="answer-choice"]'
         );
-        // Pega o último — geralmente é errado o suficiente
-        if (choices.length > 1) {
-            choices[choices.length - 1].click();
-            return true;
-        }
-        if (choices.length === 1) {
-            choices[0].click();
-            return true;
-        }
+        if (choices.length > 1) { choices[choices.length - 1].click(); return true; }
+        if (choices.length === 1) { choices[0].click(); return true; }
         return false;
     }
 
-    /* ═══════════════════════════════════════════
-       FLUXOS DOS BOTÕES
-    ═══════════════════════════════════════════ */
+    /* ══════════════════════════════════════
+       FLUXOS
+    ══════════════════════════════════════ */
     async function handleCorrect() {
         setStatus('Buscando...');
 
-        // Estratégia 1 — React fiber
         const fiberEl = findCorrectViaFiber();
         if (fiberEl) {
             fiberEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -148,29 +151,22 @@
             return;
         }
 
-        // Estratégia 2 — hint chain + checar elemento destacado pós-dica
-        setStatus('Dicas...');
+        setStatus('Usando dicas...');
         await drainHints();
 
         const highlighted = $(
-            '[class*="correct-label"], ' +
-            '[data-correct="true"], ' +
-            '[class*="answer--correct"], ' +
-            '[aria-selected="true"][class*="answer"]'
+            '[class*="correct"], [data-correct="true"], ' +
+            '[class*="answer--correct"], [class*="answerCorrect"]'
         );
-        if (highlighted) {
-            highlighted.click();
-            await sleep(200);
-        }
+        if (highlighted) { highlighted.click(); await sleep(200); }
 
-        // Para inputs de expressão as dicas já preenchem — só verificar
         clickCheck();
         setStatus('✓ Enviada');
     }
 
     async function handleIncorrect() {
         setStatus('Enviando...');
-        pickWrongAnswer();
+        pickWrong();
         await sleep(200);
         clickCheck();
         setStatus('✗ Incorreta');
@@ -178,49 +174,47 @@
 
     async function handleNext() {
         setStatus('Avançando...');
-        const ok = clickNext();
-        if (!ok) {
-            // KA às vezes precisa verificar antes de liberar o próximo
+        if (!clickNext()) {
             clickCheck();
             await sleep(900);
             clickNext();
         }
-        setStatus('▶');
+        setStatus('Pronto ▶');
     }
 
-    /* ═══════════════════════════════════════════
-       UI — PAINEL FLUTUANTE
-    ═══════════════════════════════════════════ */
+    /* ══════════════════════════════════════
+       UI
+    ══════════════════════════════════════ */
+    const PANEL_ID = 'ka-helper-v3';
     let statusEl = null;
-    const PANEL_ID = 'ka-helper-panel';
 
     function setStatus(msg) {
         if (statusEl) statusEl.textContent = msg;
     }
 
-    function injectStyles() {
-        if ($('#ka-helper-styles')) return;
+    function createPanel() {
+        if ($(`#${PANEL_ID}`)) return;
+
         const style = document.createElement('style');
-        style.id = 'ka-helper-styles';
         style.textContent = `
             #${PANEL_ID} {
-                position: fixed;
-                bottom: 28px;
-                right: 28px;
-                z-index: 2147483647;
+                position: fixed !important;
+                bottom: 28px !important;
+                right: 28px !important;
+                z-index: 2147483647 !important;
                 background: #0d1117;
                 border: 1px solid #21262d;
                 border-radius: 14px;
                 padding: 16px;
                 width: 170px;
-                display: flex;
+                display: flex !important;
                 flex-direction: column;
                 gap: 9px;
-                box-shadow: 0 8px 40px rgba(0,0,0,.75);
-                font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+                box-shadow: 0 8px 40px rgba(0,0,0,.8);
+                font-family: ui-sans-serif, system-ui, sans-serif;
                 user-select: none;
             }
-            #ka-helper-title {
+            #ka-h3-title {
                 font-size: 10px;
                 font-weight: 700;
                 letter-spacing: .1em;
@@ -228,13 +222,11 @@
                 color: #484f58;
                 text-align: center;
             }
-            #ka-helper-status {
+            #ka-h3-status {
                 font-size: 12px;
-                font-weight: 500;
                 color: #58a6ff;
                 text-align: center;
                 min-height: 15px;
-                transition: color .2s;
             }
             #${PANEL_ID} button {
                 border: none;
@@ -244,75 +236,70 @@
                 font-weight: 600;
                 cursor: pointer;
                 transition: opacity .15s, transform .1s;
-                letter-spacing: .01em;
             }
-            #${PANEL_ID} button:hover  { opacity: .85; transform: translateY(-1px); }
-            #${PANEL_ID} button:active { opacity: 1;   transform: translateY(0);    }
-            #ka-btn-correct   { background: #238636; color: #fff; }
-            #ka-btn-incorrect { background: #b91c1c; color: #fff; }
-            #ka-btn-next      { background: #1d4ed8; color: #fff; }
+            #${PANEL_ID} button:hover  { opacity:.85; transform:translateY(-1px); }
+            #${PANEL_ID} button:active { opacity:1;   transform:translateY(0);    }
+            #ka-h3-correct   { background:#238636; color:#fff; }
+            #ka-h3-incorrect { background:#b91c1c; color:#fff; }
+            #ka-h3-next      { background:#1d4ed8; color:#fff; }
         `;
         document.head.appendChild(style);
-    }
-
-    function createPanel() {
-        if ($(`#${PANEL_ID}`)) return;
-        injectStyles();
 
         const panel = document.createElement('div');
         panel.id = PANEL_ID;
         panel.innerHTML = `
-            <div id="ka-helper-title">KA Helper</div>
-            <div id="ka-helper-status">Pronto</div>
-            <button id="ka-btn-correct">✅ Correta</button>
-            <button id="ka-btn-incorrect">❌ Incorreta</button>
-            <button id="ka-btn-next">▶ Próximo</button>
+            <div id="ka-h3-title">KA Helper</div>
+            <div id="ka-h3-status">Pronto</div>
+            <button id="ka-h3-correct">✅ Correta</button>
+            <button id="ka-h3-incorrect">❌ Incorreta</button>
+            <button id="ka-h3-next">▶ Próximo</button>
         `;
         document.body.appendChild(panel);
 
-        statusEl = $('#ka-helper-status');
-        $('#ka-btn-correct').addEventListener('click', handleCorrect);
-        $('#ka-btn-incorrect').addEventListener('click', handleIncorrect);
-        $('#ka-btn-next').addEventListener('click', handleNext);
+        statusEl = $('#ka-h3-status');
+        $('#ka-h3-correct').addEventListener('click', handleCorrect);
+        $('#ka-h3-incorrect').addEventListener('click', handleIncorrect);
+        $('#ka-h3-next').addEventListener('click', handleNext);
     }
 
     function removePanel() {
         const p = $(`#${PANEL_ID}`);
-        if (p) p.remove();
-        statusEl = null;
+        if (p) { p.remove(); statusEl = null; }
     }
 
-    /* ═══════════════════════════════════════════
-       WATCHER — SPA NAVIGATION
-    ═══════════════════════════════════════════ */
-    function checkCurrentPage() {
-        if (isVideo()) {
-            removePanel();
-            return;
-        }
-        if (isExercise()) {
-            createPanel();
-        } else {
-            removePanel();
-        }
+    /* ══════════════════════════════════════
+       WATCHER
+    ══════════════════════════════════════ */
+    function checkPage() {
+        if (shouldShow()) createPanel();
+        else removePanel();
     }
 
     let lastHref = location.href;
+    let scanTimer = null;
+
+    // Varre o DOM a cada 1.5s por até 15s após navegação
+    function startScan(duration = 15000) {
+        clearInterval(scanTimer);
+        const end = Date.now() + duration;
+        scanTimer = setInterval(() => {
+            checkPage();
+            if (Date.now() > end) clearInterval(scanTimer);
+        }, 1500);
+    }
 
     new MutationObserver(() => {
-        // Detecta navegação SPA
         if (location.href !== lastHref) {
             lastHref = location.href;
             removePanel();
-            setTimeout(checkCurrentPage, 1600);
-            return;
-        }
-        // Detecta widget de exercício aparecendo dinamicamente
-        if (!$(`#${PANEL_ID}`) && !isVideo() && isExercise()) {
-            createPanel();
+            startScan();
         }
     }).observe(document.body, { childList: true, subtree: true });
 
-    // Check inicial (KA carrega lento)
-    setTimeout(checkCurrentPage, 2200);
+    // Check inicial com múltiplos delays (KA carrega lento)
+    setTimeout(checkPage, 1500);
+    setTimeout(checkPage, 3000);
+    setTimeout(checkPage, 5000);
+    startScan(20000);
+
 })();
